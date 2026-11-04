@@ -1,0 +1,50 @@
+name: Update Nix package
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Read the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="$(gh api repos/fallow-rs/fallow/releases/latest)"
+          version="$(jq -r '.tag_name | ltrimstr("v")' <<<"$release")"
+          digest="$(jq -r '.assets[] | select(.name == "fallow-linux-x64-musl") | .digest' <<<"$release")"
+          hash="$(nix hash convert --hash-algo sha256 --to sri "${digest#sha256:}")"
+          jq -n --arg version "$version" --arg hash "$hash" '{$version, $hash}' > nix/release.json
+
+      # A wrong hash or a binary that no longer runs stops here, before the commit.
+      - name: Build and run
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix build .#fallow
+          ./result/bin/fallow --version | grep -F "$(jq -r .version nix/release.json)"
+
+      - name: Commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet nix/release.json; then
+            echo "Already at the latest release."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898583+github-actions[bot]@users.noreply.github.com'
+          git commit -m "chore(nix): update to $(jq -r .version nix/release.json)" nix/release.json
+          git push origin HEAD:nix
